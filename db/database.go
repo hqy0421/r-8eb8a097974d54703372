@@ -62,6 +62,9 @@ type Database struct {
 	header      *header
 	btreeCache  *btreeCache // table and index page cache
 	objectCache *objectCache
+	// pageHook, when set, is called for every b-tree node page that gets
+	// opened. Intended for tests which classify page accesses.
+	pageHook func(page int)
 }
 
 // OpenFile opens a .sqlite file. This is the main entry point.
@@ -354,6 +357,9 @@ func (db *Database) openPage(page int) (interface{}, error) {
 	p, err := newBtree(buf, page == 1, db.header.PageSize)
 	if err == nil {
 		db.btreeCache.set(page, p)
+		if db.pageHook != nil {
+			db.pageHook(page)
+		}
 	}
 	return p, err
 }

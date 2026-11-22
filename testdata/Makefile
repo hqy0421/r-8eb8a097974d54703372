@@ -16,6 +16,8 @@ ALL:= \
     overflow.sqlite \
     prefix.sqlite \
     primarykey.sqlite \
+    sensor.sqlite \
+    sensor_norowid.sqlite \
     single.sqlite \
     truncated.sqlite \
     values.sqlite \

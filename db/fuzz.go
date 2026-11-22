@@ -36,6 +36,22 @@ func fuzz(data []byte) error {
 			return err
 		}
 
+		// exercise the projected read paths as well
+		if err := table.ScanColumns(
+			map[int]bool{0: true, 2: true, 100: true},
+			func(rowid int64, rec Record) bool {
+				return false
+			},
+		); err != nil {
+			return err
+		}
+		if _, err := table.RowidColumns(42, map[int]bool{}); err != nil {
+			return err
+		}
+		if _, err := table.RowidColumns(42, map[int]bool{0: true, 100: true}); err != nil {
+			return err
+		}
+
 		if _, err := table.Def(); err != nil {
 			return err
 		}
@@ -52,6 +68,25 @@ func fuzz(data []byte) error {
 		}
 
 		if err := index.Scan(
+			func(rec Record) bool {
+				return false
+			},
+		); err != nil {
+			return err
+		}
+
+		if err := index.ScanColumns(
+			map[int]bool{0: true, 100: true},
+			func(rec Record) bool {
+				return false
+			},
+		); err != nil {
+			return err
+		}
+
+		if err := index.ScanEqColumns(
+			Key{KeyCol{V: "q"}},
+			map[int]bool{1: true},
 			func(rec Record) bool {
 				return false
 			},

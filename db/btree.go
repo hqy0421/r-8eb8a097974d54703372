@@ -42,11 +42,19 @@ type tableBtree interface {
 // stopped.
 type indexIterCB func(row Record) (bool, error)
 
+// indexPayloadCB gets the raw cell payload instead of a parsed Record, so the
+// caller can decide how much of the overflow chain has to be read.
+type indexPayloadCB func(pl cellPayload) (bool, error)
+
 type indexBtree interface {
 	// Iter goes over every record
 	Iter(int, *Database, indexIterCB) (bool, error)
+	// Iter goes over every record, giving the raw payload
+	IterPayload(int, *Database, indexPayloadCB) (bool, error)
 	// Scan starting from a key
 	IterMin(int, *Database, Key, indexIterCB) (bool, error)
+	// Scan starting from a key, giving the raw payload
+	IterMinPayload(int, *Database, Key, indexPayloadCB) (bool, error)
 	// Count counts the number of records. For debugging.
 	Count(*Database) (int, error)
 }
@@ -286,6 +294,15 @@ func (l *indexLeaf) Iter(_ int, db *Database, cb indexIterCB) (bool, error) {
 	return false, nil
 }
 
+func (l *indexLeaf) IterPayload(_ int, _ *Database, cb indexPayloadCB) (bool, error) {
+	for _, pl := range l.cells {
+		if done, err := cb(pl); done || err != nil {
+			return done, err
+		}
+	}
+	return false, nil
+}
+
 func (l *indexLeaf) IterMin(_ int, db *Database, key Key, cb indexIterCB) (bool, error) {
 	var searchErr error
 	n := sort.Search(len(l.cells), func(n int) bool {
@@ -310,6 +327,27 @@ func (l *indexLeaf) IterMin(_ int, db *Database, key Key, cb indexIterCB) (bool,
 		}
 
 		if done, err := cb(rec); done || err != nil {
+			return done, err
+		}
+	}
+	return false, nil
+}
+
+func (l *indexLeaf) IterMinPayload(_ int, db *Database, key Key, cb indexPayloadCB) (bool, error) {
+	var searchErr error
+	n := sort.Search(len(l.cells), func(n int) bool {
+		r, err := indexBinSearchPayload(db, l.cells[n], key)
+		if err != nil {
+			searchErr = err
+		}
+		return r
+	})
+	if searchErr != nil {
+		return false, searchErr
+	}
+
+	for _, pl := range l.cells[n:] {
+		if done, err := cb(pl); done || err != nil {
 			return done, err
 		}
 	}
@@ -378,6 +416,32 @@ func (l *indexInterior) Iter(r int, db *Database, cb indexIterCB) (bool, error) 
 	return page.Iter(r-1, db, cb)
 }
 
+func (l *indexInterior) IterPayload(r int, db *Database, cb indexPayloadCB) (bool, error) {
+	if r == 0 {
+		return false, ErrRecursion
+	}
+	for _, c := range l.cells {
+		page, err := db.openIndex(c.left)
+		if err != nil {
+			return false, err
+		}
+		if done, err := page.IterPayload(r-1, db, cb); done || err != nil {
+			return done, err
+		}
+
+		// the btree node also has a record
+		if done, err := cb(c.payload); done || err != nil {
+			return done, err
+		}
+	}
+
+	page, err := db.openIndex(l.rightmost)
+	if err != nil {
+		return false, err
+	}
+	return page.IterPayload(r-1, db, cb)
+}
+
 func (l *indexInterior) IterMin(r int, db *Database, key Key, cb indexIterCB) (bool, error) {
 	if r == 0 {
 		return false, ErrRecursion
@@ -435,6 +499,58 @@ func (l *indexInterior) IterMin(r int, db *Database, key Key, cb indexIterCB) (b
 		return page.Iter(r-1, db, cb)
 	} else {
 		return page.IterMin(r-1, db, key, cb)
+	}
+}
+
+func (l *indexInterior) IterMinPayload(r int, db *Database, key Key, cb indexPayloadCB) (bool, error) {
+	if r == 0 {
+		return false, ErrRecursion
+	}
+
+	// binary search the page containing the range of the key
+	var searchErr error
+	n := sort.Search(len(l.cells), func(n int) bool {
+		r, err := indexBinSearchPayload(db, l.cells[n].payload, key)
+		if err != nil {
+			searchErr = err
+		}
+		return r
+	})
+	if searchErr != nil {
+		return false, searchErr
+	}
+
+	useIter := false
+	for _, c := range l.cells[n:] {
+		page, err := db.openIndex(c.left)
+		if err != nil {
+			return false, err
+		}
+		if useIter {
+			if done, err := page.IterPayload(r-1, db, cb); done || err != nil {
+				return done, err
+			}
+		} else {
+			if done, err := page.IterMinPayload(r-1, db, key, cb); done || err != nil {
+				return done, err
+			}
+		}
+		useIter = true // from now on we can simply scan
+
+		// the node has a record, too
+		if done, err := cb(c.payload); done || err != nil {
+			return done, err
+		}
+	}
+	page, err := db.openIndex(l.rightmost)
+	if err != nil {
+		return false, err
+	}
+
+	if useIter {
+		return page.IterPayload(r-1, db, cb)
+	} else {
+		return page.IterMinPayload(r-1, db, key, cb)
 	}
 }
 
@@ -586,14 +702,42 @@ func parseCellpointers(
 }
 
 func indexBinSearch(db *Database, pl cellPayload, key Key) (bool, error) {
-	// It would be possible to not load the record by default but compare with
-	// what's available, and to only call addOverflow() when that data is
-	// needed.
 	full, err := addOverflow(db, pl)
 	if err != nil {
 		return true, err
 	}
 	rec, err := parseRecord(full)
+	if err != nil {
+		return true, err
+	}
+
+	return Search(key, rec), nil
+}
+
+// indexBinSearchPayload is indexBinSearch without reading the whole record:
+// only the key columns (and everything before them) are parsed, so a large
+// trailing value doesn't pull in its overflow chain during a search.
+func indexBinSearchPayload(db *Database, pl cellPayload, key Key) (bool, error) {
+	h, err := parseRecordHeader(pl.Payload)
+	if err != nil {
+		return true, err
+	}
+	fields := make(map[int]bool, len(key))
+	for i := range key {
+		if i >= len(h.serials) {
+			break
+		}
+		fields[i] = true
+	}
+	limit := recordPayloadLimit(h, fields)
+	if limit > pl.Length {
+		return true, ErrCorrupted
+	}
+	c, err := addOverflowLimit(db, pl, limit)
+	if err != nil {
+		return true, err
+	}
+	rec, err := parseRecordFields(c, h, fields)
 	if err != nil {
 		return true, err
 	}

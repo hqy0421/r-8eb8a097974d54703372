@@ -56,6 +56,21 @@ func toColumnIndexRowid(s *sdb.Schema, columns []string) ([]columnIndex, error) 
 	return res, nil
 }
 
+// recordFields turns a projection into the set of on-disk record field indexes
+// that have to be parsed. Rowid aliases don't take a record field. The map is
+// always non-nil so an empty projection (rowid-only, or no columns at all)
+// still takes the projected path and reads nothing past the record header.
+func recordFields(cis []columnIndex) map[int]bool {
+	fields := make(map[int]bool, len(cis))
+	for _, c := range cis {
+		if c.rowid {
+			continue
+		}
+		fields[c.rowIndex] = true
+	}
+	return fields
+}
+
 // given column names returns the index of this column in a row in the index (and
 // the column definition). For non-rowid tables the database order of the
 // columns depends on the primary key.

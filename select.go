@@ -16,7 +16,7 @@ func select_(db *sdb.Database, s *sdb.Schema, cb RowDoneCB, columns []string) er
 	if err != nil {
 		return err
 	}
-	return t.Scan(func(rowid int64, r sdb.Record) bool {
+	return t.ScanColumns(recordFields(ci), func(rowid int64, r sdb.Record) bool {
 		return cb(toRow(rowid, ci, r))
 	})
 }
@@ -31,7 +31,7 @@ func selectNonRowid(db *sdb.Database, s *sdb.Schema, cb RowDoneCB, columns []str
 	if err != nil {
 		return err
 	}
-	return t.Scan(func(r sdb.Record) bool {
+	return t.ScanColumns(recordFields(ci), func(r sdb.Record) bool {
 		return cb(toRow(0, ci, r))
 	})
 }
@@ -46,7 +46,7 @@ func selectRowid(db *sdb.Database, s *sdb.Schema, rowid int64, columns []string)
 	if err != nil {
 		return nil, err
 	}
-	r, err := t.Rowid(rowid)
+	r, err := t.RowidColumns(rowid, recordFields(ci))
 	if err != nil || r == nil {
 		return nil, err
 	}
@@ -109,8 +109,9 @@ func pkSelectNonRowid(db *sdb.Database, s *sdb.Schema, key Key, cb RowCB, column
 		return err
 	}
 
-	return t.ScanEq(
+	return t.ScanEqColumns(
 		dbkey,
+		recordFields(ci),
 		func(r sdb.Record) bool {
 			cb(toRow(0, ci, r))
 			return false

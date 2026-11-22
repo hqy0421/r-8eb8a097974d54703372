@@ -32,7 +32,7 @@ func indexedSelect(
 		if err != nil {
 			return false
 		}
-		row, err := tab.Rowid(rowid)
+		row, err := tab.RowidColumns(rowid, recordFields(ci))
 		if err != nil || row == nil {
 			// row should never be nil
 			return false
@@ -73,7 +73,7 @@ func indexedSelectEq(
 			if err != nil {
 				return false
 			}
-			row, err := tab.Rowid(rowid)
+			row, err := tab.RowidColumns(rowid, recordFields(ci))
 			if err != nil || row == nil {
 				// row should never be nil
 				return false
@@ -118,7 +118,7 @@ func indexedSelectNonRowid(
 		setKey(r, cols, pk)
 
 		var found sdb.Record
-		err := tab.ScanEq(pk, func(row sdb.Record) bool {
+		err := tab.ScanEqColumns(pk, recordFields(ci), func(row sdb.Record) bool {
 			found = row
 			return true
 		})
@@ -169,7 +169,7 @@ func indexedSelectEqNonRowid(
 			setKey(r, cols, pk)
 
 			var found sdb.Record
-			err := tab.ScanEq(pk, func(row sdb.Record) bool { found = row; return true })
+			err := tab.ScanEqColumns(pk, recordFields(ci), func(row sdb.Record) bool { found = row; return true })
 			if err != nil || found == nil {
 				// found should never be nil
 				return false

@@ -30,6 +30,24 @@ Printing the columns:
     }
 
 
+## projected reads
+
+`Scan`, `Rowid` and the index helpers always parse the whole record. When a
+record contains a large value (a BLOB or TEXT that spans many overflow pages)
+but you only need a few short fields, use the `...Columns` variants instead:
+
+    table.ScanColumns(map[int]bool{0: true, 1: true}, func(rowid int64, rec Record) bool {
+        // only fields 0 and 1 are parsed; the other entries of rec are nil.
+        return false
+    })
+    rec, _ := table.RowidColumns(rowid, map[int]bool{1: true})
+
+They walk the overflow chain only until the last requested field is reached.
+Requesting a field that is stored after the overflowing value still parses
+correctly; requesting the large value itself reads the complete chain, exactly
+like `Scan`.
+
+
 ## locks
 
 If you somehow know that no-one will change the .sqlite file you don't have to

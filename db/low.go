@@ -69,12 +69,31 @@ func (t *Table) Scan(cb TableScanCB) error {
 		maxRecursion,
 		t.db,
 		func(rowid int64, pl cellPayload) (bool, error) {
-			c, err := addOverflow(t.db, pl)
+			rec, err := parseCellRecord(t.db, pl, nil)
 			if err != nil {
 				return false, err
 			}
+			return cb(rowid, rec), nil
+		},
+	)
+	return err
+}
 
-			rec, err := parseRecord(c)
+// ScanColumns is like Scan(), but only parses the given record fields. Fields
+// not in columns are left as nil in the Record (which always has one entry per
+// field in the header). This avoids reading the overflow pages of unrequested
+// large values: only the part of the overflow chain that holds the header and
+// the requested fields is loaded. A nil columns map parses every field.
+func (t *Table) ScanColumns(columns map[int]bool, cb TableScanCB) error {
+	root, err := t.db.openTable(t.root)
+	if err != nil {
+		return err
+	}
+	_, err = root.Iter(
+		maxRecursion,
+		t.db,
+		func(rowid int64, pl cellPayload) (bool, error) {
+			rec, err := parseCellRecord(t.db, pl, columns)
 			if err != nil {
 				return false, err
 			}
@@ -89,6 +108,12 @@ func (t *Table) Scan(cb TableScanCB) error {
 // that should be the same.
 // See Table.Scan comments about the Record
 func (t *Table) Rowid(rowid int64) (Record, error) {
+	return t.RowidColumns(rowid, nil)
+}
+
+// RowidColumns is like Rowid(), but only parses the given record fields. See
+// Table.ScanColumns for the meaning of columns.
+func (t *Table) RowidColumns(rowid int64, columns map[int]bool) (Record, error) {
 	root, err := t.db.openTable(t.root)
 	if err != nil {
 		return nil, err
@@ -112,11 +137,35 @@ func (t *Table) Rowid(rowid int64) (Record, error) {
 		return nil, nil
 	}
 
-	c, err := addOverflow(t.db, *recPl)
+	return parseCellRecord(t.db, *recPl, columns)
+}
+
+// parseCellRecord turns a table cell payload into a Record. A nil fields map
+// parses the whole record (following the complete overflow chain); otherwise
+// only the named record fields are parsed, and overflow pages are loaded just
+// far enough to reach them.
+func parseCellRecord(db *Database, pl cellPayload, fields map[int]bool) (Record, error) {
+	if fields == nil {
+		c, err := addOverflow(db, pl)
+		if err != nil {
+			return nil, err
+		}
+		return parseRecord(c)
+	}
+
+	h, err := parseRecordHeader(pl.Payload)
 	if err != nil {
 		return nil, err
 	}
-	return parseRecord(c)
+	limit := recordPayloadLimit(h, fields)
+	if limit > pl.Length {
+		return nil, ErrCorrupted
+	}
+	c, err := addOverflowLimit(db, pl, limit)
+	if err != nil {
+		return nil, err
+	}
+	return parseRecordFields(c, h, fields)
 }
 
 // Def returns the index definition.
@@ -154,6 +203,29 @@ func (in *Index) Scan(cb RecordCB) error {
 	return err
 }
 
+// ScanColumns is like Scan(), but only parses the given record fields. See
+// Table.ScanColumns for the meaning of columns and for the overflow savings.
+// A nil columns map parses every field.
+func (in *Index) ScanColumns(columns map[int]bool, cb RecordCB) error {
+	root, err := in.db.openIndex(in.root)
+	if err != nil {
+		return err
+	}
+
+	_, err = root.IterPayload(
+		maxRecursion,
+		in.db,
+		func(pl cellPayload) (bool, error) {
+			rec, err := parseCellRecord(in.db, pl, columns)
+			if err != nil {
+				return false, err
+			}
+			return cb(rec), nil
+		},
+	)
+	return err
+}
+
 // Scan all record matching key
 func (in *Index) ScanEq(key Key, cb RecordCB) error {
 	root, err := in.db.openIndex(in.root)
@@ -173,6 +245,51 @@ func (in *Index) ScanEq(key Key, cb RecordCB) error {
 		},
 	)
 	return err
+}
+
+// ScanEqColumns is like ScanEq(), but only parses the key columns and the
+// fields in columns. See Table.ScanColumns for the overflow savings.
+func (in *Index) ScanEqColumns(key Key, columns map[int]bool, cb RecordCB) error {
+	root, err := in.db.openIndex(in.root)
+	if err != nil {
+		return err
+	}
+
+	_, err = root.IterMinPayload(
+		maxRecursion,
+		in.db,
+		key,
+		func(pl cellPayload) (bool, error) {
+			// the key columns have to be parsed to test the match
+			fields := mergeKeyFields(key, columns)
+			rec, err := parseCellRecord(in.db, pl, fields)
+			if err != nil {
+				return false, err
+			}
+			if !Equals(key, rec) {
+				return true, nil
+			}
+			return cb(rec), nil
+		},
+	)
+	return err
+}
+
+// mergeKeyFields returns a field set containing both the key columns (needed
+// for equality checks) and the requested columns. A nil columns map means all
+// fields are wanted.
+func mergeKeyFields(key Key, columns map[int]bool) map[int]bool {
+	if columns == nil {
+		return nil
+	}
+	fields := make(map[int]bool, len(columns)+len(key))
+	for i := range columns {
+		fields[i] = true
+	}
+	for i := range key {
+		fields[i] = true
+	}
+	return fields
 }
 
 // ScanMin calls cb() for every row in the index, starting from the first
